@@ -7,10 +7,11 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use futures_util::StreamExt;
 use hound::WavReader;
+use indicatif::{ProgressBar, ProgressStyle};
 use ndarray::{Array2, Axis};
 use ort::{session::Session, value::Tensor};
-use rubato::{FftFixedIn, Resampler};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -18,6 +19,7 @@ use std::io::{BufReader, Cursor};
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 // ============================================================================
@@ -27,13 +29,14 @@ use tokio::sync::Mutex;
 /// Wav2Vec2 ASR Phoneme Recognizer
 #[derive(Parser, Debug)]
 #[command(name = "asr")]
-#[command(version = "0.1")]
+#[command(version = "1.0")]
 #[command(about = "Speech-to-Phoneme recognition using Wav2Vec2 ONNX")]
 struct Args {
     #[command(subcommand)]
     mode: Mode,
 
-    /// Path to the ONNX model directory
+    /// Path to the ONNX model directory. If model files are missing,
+    /// they will be automatically downloaded from HuggingFace (tyanfarm/aimate-asr-ONNX)
     #[arg(short, long, default_value = "aimate-asr-onnx", global = true)]
     model_dir: String,
 }
@@ -51,11 +54,11 @@ enum Mode {
     /// Start OpenAI-compatible HTTP API server
     #[command(alias = "o")]
     Openai {
-        /// IP address to bind to
+        /// Host/IP address to bind the server to (use 0.0.0.0 for all interfaces)
         #[arg(long, default_value = "127.0.0.1")]
         ip: IpAddr,
 
-        /// Port to listen on
+        /// Port to listen on for HTTP requests
         #[arg(long, default_value = "3001")]
         port: u16,
     },
@@ -64,6 +67,90 @@ enum Mode {
 // ============================================================================
 // Model Configuration
 // ============================================================================
+
+/// Configuration for ASR model downloads
+#[derive(Clone)]
+pub struct ASRConfig {
+    pub model_url: String,
+    pub vocab_url: String,
+    pub config_url: String,
+}
+
+impl Default for ASRConfig {
+    fn default() -> Self {
+        Self {
+            model_url: "https://huggingface.co/tyanfarm/aimate-asr-ONNX/resolve/main/model.onnx".into(),
+            vocab_url: "https://huggingface.co/tyanfarm/aimate-asr-ONNX/resolve/main/vocab.json".into(),
+            config_url: "https://huggingface.co/tyanfarm/aimate-asr-ONNX/resolve/main/config.json".into(),
+        }
+    }
+}
+
+/// Download a file from URL with progress bar
+async fn download_file_from_url(url: &str, path: &Path) -> Result<()> {
+    // Create parent directories if needed
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+    }
+
+    println!("Downloading {} -> {:?}", url, path);
+    
+    let resp = reqwest::get(url).await
+        .with_context(|| format!("Failed to request: {}", url))?;
+    
+    if !resp.status().is_success() {
+        anyhow::bail!("Failed to download file: HTTP {}", resp.status());
+    }
+    
+    let total_size = resp.content_length().unwrap_or(0);
+    
+    let pb = ProgressBar::new(total_size);
+    pb.set_style(ProgressStyle::default_bar()
+        .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+        .unwrap()
+        .progress_chars("#>-"));
+    
+    let mut file = tokio::fs::File::create(path).await
+        .with_context(|| format!("Failed to create file: {:?}", path))?;
+    
+    let mut stream = resp.bytes_stream();
+    let mut downloaded: u64 = 0;
+    
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| "Error downloading chunk")?;
+        file.write_all(&chunk).await
+            .with_context(|| "Failed to write chunk to file")?;
+        downloaded += chunk.len() as u64;
+        pb.set_position(downloaded);
+    }
+    
+    pb.finish_with_message("Download completed");
+    println!("Downloaded: {:?}", path);
+    
+    Ok(())
+}
+
+/// Ensure all required model files exist, downloading if necessary
+async fn ensure_model_files(model_dir: &Path, config: &ASRConfig) -> Result<()> {
+    let model_path = model_dir.join("model.onnx");
+    let vocab_path = model_dir.join("vocab.json");
+    let config_path = model_dir.join("config.json");
+    
+    if !model_path.exists() {
+        download_file_from_url(&config.model_url, &model_path).await?;
+    }
+    
+    if !vocab_path.exists() {
+        download_file_from_url(&config.vocab_url, &vocab_path).await?;
+    }
+    
+    if !config_path.exists() {
+        download_file_from_url(&config.config_url, &config_path).await?;
+    }
+    
+    Ok(())
+}
 
 /// Model configuration from config.json
 #[derive(Deserialize, Debug, Clone)]
@@ -389,7 +476,7 @@ struct ErrorDetail {
     code: String,
 }
 
-/// Health check endpoint
+/// GET /health - Health check endpoint
 async fn handle_health() -> &'static str {
     "OK"
 }
@@ -519,7 +606,7 @@ async fn handle_transcription(
 /// Create the HTTP server
 async fn create_server(engine: SharedASREngine) -> Router {
     Router::new()
-        .route("/", get(handle_health))
+        .route("/health", get(handle_health))
         .route("/v1/audio/transcriptions", post(handle_transcription))
         .route("/v1/models", get(handle_models))
         .layer(CorsLayer::permissive())
@@ -535,6 +622,12 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     
     let model_dir = Path::new(&args.model_dir);
+    
+    // Ensure model files are downloaded
+    println!("Model directory: {}", model_dir.display());
+    println!("Models will be auto-downloaded from HuggingFace if missing.\n");
+    let asr_config = ASRConfig::default();
+    ensure_model_files(model_dir, &asr_config).await?;
     
     match args.mode {
         Mode::Transcribe { audio } => {
@@ -574,7 +667,7 @@ async fn main() -> Result<()> {
             println!("\nEndpoints:");
             println!("  POST /v1/audio/transcriptions - Transcribe audio files");
             println!("  GET  /v1/models               - List available models");
-            println!("  GET  /                        - Health check");
+            println!("  GET  /health                  - Health check");
             println!("\nExample usage:");
             println!("  curl -X POST http://{}/v1/audio/transcriptions \\", addr);
             println!("    -F \"file=@audio.wav\" \\");
