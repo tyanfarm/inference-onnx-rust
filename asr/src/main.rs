@@ -269,52 +269,29 @@ fn load_audio_from_reader<R: std::io::Read>(reader: WavReader<R>, target_sample_
     Ok(resampled)
 }
 
-/// Resample audio using rubato Sinc resampler
-/// Note: For 100% match with Python/librosa, preprocess audio to 16kHz first
+/// Resample audio using soxr (same as librosa's default soxr_hq)
 fn resample_audio(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-    use rubato::{SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction, Resampler};
+    use libsoxr::Soxr;
     
-    let params = SincInterpolationParameters {
-        sinc_len: 256,
-        f_cutoff: 0.95,
-        interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256,
-        window: WindowFunction::BlackmanHarris2,
-    };
+    // Create soxr resampler with HQ quality (same as librosa's soxr_hq)
+    let soxr = Soxr::create(
+        from_rate as f64,
+        to_rate as f64,
+        1,  // 1 channel (mono)
+        None,  // default IO spec
+        None,  // default quality spec (HQ)
+        None,  // default runtime spec
+    ).with_context(|| "Failed to create soxr resampler")?;
     
-    let mut resampler = SincFixedIn::<f32>::new(
-        to_rate as f64 / from_rate as f64,
-        2.0,
-        params,
-        1024,
-        1,
-    ).with_context(|| "Failed to create resampler")?;
+    // Calculate output size
+    let out_len = (samples.len() as f64 * to_rate as f64 / from_rate as f64).ceil() as usize;
+    let mut output = vec![0.0f32; out_len + 1024];  // Add buffer for safety
     
-    let mut output = Vec::new();
-    let chunk_size = resampler.input_frames_next();
-    let mut pos = 0;
+    // Resample
+    let (_, out_done) = soxr.process(Some(samples), &mut output)
+        .with_context(|| "Resampling failed")?;
     
-    while pos < samples.len() {
-        let end = (pos + chunk_size).min(samples.len());
-        let chunk: Vec<f32> = samples[pos..end].to_vec();
-        
-        let padded_chunk = if chunk.len() < chunk_size {
-            let mut padded = chunk;
-            padded.resize(chunk_size, 0.0);
-            padded
-        } else {
-            chunk
-        };
-        
-        let input_buffer = vec![padded_chunk];
-        
-        if let Ok(resampled) = resampler.process(&input_buffer, None) {
-            output.extend(resampled[0].iter());
-        }
-        
-        pos += chunk_size;
-    }
-    
+    output.truncate(out_done);
     Ok(output)
 }
 
