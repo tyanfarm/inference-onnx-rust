@@ -1,0 +1,3 @@
+[workspace]
+members = ["koko", "kokoros", "kokoros-openai", "asr"]
+resolver = "2"

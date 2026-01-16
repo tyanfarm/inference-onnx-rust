@@ -1,0 +1,2 @@
+*.onnx
+!download_models.sh

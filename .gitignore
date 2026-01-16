@@ -1,0 +1,11 @@
+/target
+vendor/
+*.wav
+*.DS_store
+.venv
+venv/
+.vscode/
+.worktrees/
+.idea/
+tmp/
+*onnx
