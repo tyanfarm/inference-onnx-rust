@@ -189,10 +189,42 @@ impl ASREngine {
 
         println!("\nLoading ONNX model...");
         let model_path = model_dir.join("model.onnx");
-        let session = Session::builder()
-            .with_context(|| "Failed to create session builder")?
-            .commit_from_file(&model_path)
-            .with_context(|| format!("Failed to load model: {:?}", model_path))?;
+        
+        #[cfg(feature = "directml")]
+        let session = {
+            println!("Using DirectML execution provider (GPU)");
+            Session::builder()?
+                .with_execution_providers([ort::ep::directml::DirectML::default().build()])?
+                .commit_from_file(&model_path)
+                .with_context(|| format!("Failed to load model with DirectML: {:?}", model_path))?
+        };
+        
+        #[cfg(all(feature = "cuda", not(feature = "directml")))]
+        let session = {
+            println!("Using CUDA execution provider (GPU)");
+            Session::builder()?
+                .with_execution_providers([ort::ep::cuda::CUDA::default().build()])?
+                .commit_from_file(&model_path)
+                .with_context(|| format!("Failed to load model with CUDA: {:?}", model_path))?
+        };
+        
+        #[cfg(all(feature = "coreml", not(feature = "directml"), not(feature = "cuda")))]
+        let session = {
+            println!("Using CoreML execution provider (Apple GPU)");
+            Session::builder()?
+                .with_execution_providers([ort::ep::coreml::CoreML::default().build()])?
+                .commit_from_file(&model_path)
+                .with_context(|| format!("Failed to load model with CoreML: {:?}", model_path))?
+        };
+        
+        #[cfg(not(any(feature = "cuda", feature = "directml", feature = "coreml")))]
+        let session = {
+            println!("Using CPU execution provider");
+            Session::builder()?
+                .commit_from_file(&model_path)
+                .with_context(|| format!("Failed to load model: {:?}", model_path))?
+        };
+        
         println!("Model loaded successfully!");
 
         Ok(Self {
