@@ -1,64 +1,17 @@
-name: Build macOS
+name: SSH macOS
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
-  workflow_dispatch:  # Allow manual trigger
-
-env:
-  CARGO_TERM_COLOR: always
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
-  build-macos:
+  ssh-macos:
     runs-on: macos-latest
-    
-    strategy:
-      matrix:
-        target: [x86_64-apple-darwin, aarch64-apple-darwin]
-        features: [coreml]
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-action@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install dependencies (soxr)
-        run: |
-          brew install libsoxr pkg-config
-
-      # SSH into runner for debugging (remove this step when done)
       - name: Setup tmate session
         uses: mxschmitt/action-tmate@v3
         with:
-          limit-access-to-actor: true  # Only you can access
-
-      - name: Build ASR binary
-        run: |
-          cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} -p asr
-        env:
-          PKG_CONFIG_PATH: /opt/homebrew/lib/pkgconfig:/usr/local/lib/pkgconfig
-
-      - name: Copy libsoxr for distribution
-        run: |
-          mkdir -p dist
-          cp target/${{ matrix.target }}/release/asr dist/asr-${{ matrix.target }}-${{ matrix.features }}
-          
-          # Copy libsoxr dynamic library
-          if [ "${{ matrix.target }}" == "aarch64-apple-darwin" ]; then
-            cp /opt/homebrew/lib/libsoxr.dylib dist/ 2>/dev/null || cp /usr/local/lib/libsoxr.dylib dist/
-          else
-            cp /usr/local/lib/libsoxr.dylib dist/ 2>/dev/null || cp /opt/homebrew/lib/libsoxr.dylib dist/
-          fi
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: asr-${{ matrix.target }}-${{ matrix.features }}
-          path: dist/
-          retention-days: 30
+          limit-access-to-actor: true
