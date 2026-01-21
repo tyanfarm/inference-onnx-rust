@@ -3,9 +3,15 @@ name: SSH macOS
 on:
   workflow_dispatch:  # Manual trigger only
 
+permissions:
+  contents: write  # Required for creating releases
+
 jobs:
   ssh-macos:
     runs-on: macos-latest
+
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout repository
