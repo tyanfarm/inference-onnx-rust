@@ -32,6 +32,12 @@ jobs:
         run: |
           brew install libsoxr pkg-config
 
+      # SSH into runner for debugging (remove this step when done)
+      - name: Setup tmate session
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true  # Only you can access
+
       - name: Build ASR binary
         run: |
           cargo build --release --target ${{ matrix.target }} --features ${{ matrix.features }} -p asr
