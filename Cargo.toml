@@ -1,3 +1,4 @@
 [workspace]
 members = ["koko", "kokoros", "kokoros-openai", "asr"]
+default-members = ["asr"]
 resolver = "2"
